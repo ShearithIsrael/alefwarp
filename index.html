@@ -259,11 +259,8 @@ function endsRight(heardN, w){
   return !heardOpen && endClass(c) === t.cls;
 }
 // Did any of the recognizer's guesses match this word?
-// Latin letters: a recognizer sometimes writes a short sound in English letters ("ta", "bah") — compare by sound
-function latinKey(x){
-  return (x || '').toLowerCase().replace(/[^a-z]/g, '').replace(/kh/g, 'ch').replace(/ts/g, 'tz')
-    .replace(/([aeiou])h(?=[^aeiou]|$)/g, '$1').replace(/(.)\1+/g, '$1');
-}
+// Hebrew only: the recognizer is set to Hebrew (he-IL), and anything it writes in English letters is ignored
+function hebrewOnly(t){ return (t || '').replace(/[A-Za-z][A-Za-z'’\-]*/g, ' ').replace(/\s+/g, ' ').trim(); }
 function heardMatches(word, guesses){
   var target = normHeb(word.w), tLen = target.length, pieces = [], multi = /\s/.test(word.w.trim());
   var letterName = LETTER_NAMES[target];      // a word that is also a letter's name (אָלֶף, בֵּית, עַיִן…)
@@ -274,7 +271,6 @@ function heardMatches(word, guesses){
   });
   for (var i = 0; i < pieces.length; i++) {
     var p = pieces[i]; if (!p) continue;
-    var lat = latinKey(p); if (lat && lat === latinKey((word.d || '').split(',')[0])) return true;
     var n = normHeb(p).replace(/[^א-ת]/g, '');
     if (!n) continue;
     if (n === target) return true;                                    // exactly the word
@@ -801,7 +797,7 @@ function showHeard(list, cls){
   box.className = cls || '';
 }
 function nextWord(){
-  showHeard([]);
+  showHeard([]); G.blankTries = 0;
   hideReveal();
   if (G.round >= G.words.length) { endRound(); return; }
   G.word = G.words[G.round]; hud();
@@ -905,7 +901,7 @@ document.getElementById('mic-test').onclick = function(){
   var go = function(){
     note.textContent = '🎤 Listening for 5 seconds — say שָׁלוֹם (shalom)!';
     var r = new SR(), got = [], errd = false; r.lang = 'he-IL'; r.interimResults = true; r.maxAlternatives = 3; r.continuous = true;
-    r.onresult = function(ev){ got = []; for (var i = 0; i < ev.results.length; i++) got.push(ev.results[i][0].transcript); note.textContent = '🎤 Heard: ' + got.join(' '); };
+    r.onresult = function(ev){ got = []; for (var i = 0; i < ev.results.length; i++) { var gt = hebrewOnly(ev.results[i][0].transcript); if (gt) got.push(gt); } note.textContent = '🎤 Heard: ' + got.join(' '); };
     r.onerror = function(ev){ errd = true; note.textContent = micErrorText(ev.error); };
     r.onend = function(){ if (errd) return; note.textContent = got.length ? '✅ The microphone works! It heard: ' + got.join(' ') : micErrorText('no-speech'); };
     try { r.start(); setTimeout(function(){ try { r.stop(); } catch(e) {} }, 5000); } catch(e) { note.textContent = micErrorText(e.name || 'start'); }
@@ -968,12 +964,15 @@ function listen(mode){
   rec = r;
   r.lang = 'he-IL'; r.continuous = !tap; r.interimResults = true; r.maxAlternatives = 5;   // tap: one phrase, then it stops by itself
   var gotSound = false;
+  var spoke = false;   // the mic picked up a voice (even if no word came back)
   r.onstart = r.onaudiostart = function(){ gotSound = true; };
+  r.onspeechstart = r.onsoundstart = function(){ gotSound = true; spoke = true; };
   r.onresult = function(ev){
     if (rec !== r) return;
     heard = [];
-    for (var i = 0; i < ev.results.length; i++) for (var a = 0; a < ev.results[i].length; a++) heard.push(ev.results[i][a].transcript);
-    var finals = []; for (var j = 0; j < ev.results.length; j++) finals.push(ev.results[j][0].transcript);
+    for (var i = 0; i < ev.results.length; i++) for (var a = 0; a < ev.results[i].length; a++) { var ht = hebrewOnly(ev.results[i][a].transcript); if (ht) heard.push(ht); }
+    var finals = []; for (var j = 0; j < ev.results.length; j++) { var ft = hebrewOnly(ev.results[j][0].transcript); if (ft) finals.push(ft); }
+    if (!heard.length) return;   // only English came back: treat it as nothing heard
     showHeard([finals.join(' ')].concat(heard.slice(1)));
     // check every piece it heard (each phrase, word and word-pair), so other sounds around the word don't matter
     var pieces = heard.slice(); if (auto) pieces = [];
@@ -991,7 +990,8 @@ function listen(mode){
       autoPaused = true; document.getElementById('mic').classList.add('paused');
       setStatus(micErrorText(ev.error), 'bad'); return;
     }
-    if (ev.error === 'no-speech') setStatus(tap ? 'Didn\'t hear you — tap 🎤 and read' : wasReleased ? 'Didn\'t catch that — hold 🎤 and read' : 'Didn\'t hear you — hold 🎤 and read louder', 'bad');
+    if (ev.error === 'no-speech' && spoke && G.word && !G.word.mean && (G.blankTries = (G.blankTries || 0) + 1) >= 2) { showHeard(['🎤 ✓'], 'ok'); wordRead(); return; }
+    if (ev.error === 'no-speech') setStatus(tap ? 'Didn\'t hear you — tap 🎤 and say it a little longer' : wasReleased ? 'Didn\'t catch that — hold 🎤 and read' : 'Didn\'t hear you — hold 🎤 and read louder', 'bad');
     else setStatus(micErrorText(ev.error), 'bad');
   };
   r.onend = function(){
@@ -1006,7 +1006,14 @@ function listen(mode){
     }
     if (heard.length && G.word && heardMatches(G.word, heard)) { showHeard(heard, 'ok'); wordRead(); return; }
     if (heard.length && wasReleased) { showHeard(heard, 'no'); sfxTry(); hintWord(heard[0]); return; }
-    if (wasReleased) setStatus(tap ? 'Didn\'t catch that — tap 🎤 and read' : 'Didn\'t catch that — hold 🎤 and read', 'bad');
+    // A short practice sound (תָּ, בַּשׁ…) is often too short for the recognizer to write anything down.
+    // If the mic clearly heard a voice but no word came back twice in a row, count it.
+    if (!heard.length && spoke && G.word && !G.word.mean) {
+      G.blankTries = (G.blankTries || 0) + 1;
+      if (G.blankTries >= 2) { showHeard(['🎤 ✓'], 'ok'); wordRead(); return; }
+      setStatus('I heard you, but not the sound — say it a little longer and louder!', 'bad'); return;
+    }
+    if (wasReleased) setStatus(tap ? 'Didn\'t catch that — tap 🎤 and say it a little longer' : 'Didn\'t catch that — hold 🎤 and read', 'bad');
     else if (holding) setStatus('Let go and hold 🎤 again', 'bad');   // the browser stopped listening by itself
   };
   document.getElementById('mic').classList.add('listening'); setStatus(auto ? '🎤 Read the word out loud!' : '🎤 Listening…');
